@@ -15,67 +15,114 @@ const symptomDictionary = [
   { key: 'vomitos', aliases: ['vomitos', 'vômitos', 'nauseas', 'náuseas'] }
 ];
 
+function unique(values = []) {
+  return Array.from(new Set(values.filter(Boolean)));
+}
+
 function parseBloodPressure(text = '') {
-  const match = text.match(/(\d{2,3})\s*\/?\s*(\d{2,3})/);
-  if (!match) return null;
-  const systolic = Number(match[1]);
-  const diastolic = Number(match[2]);
-  if (!systolic || !diastolic) return null;
-  if (systolic < 70 || systolic > 260 || diastolic < 40 || diastolic > 180) return null;
-  return { systolic, diastolic };
+  const source = String(text || '');
+
+  // Prioriza formatos clássicos tipo 145/95
+  const directMatch = source.match(/(?:pa|pressao arterial|pressão arterial|bp)?[^\d]{0,10}(\d{2,3})\s*\/\s*(\d{2,3})/i);
+  if (directMatch) {
+    const systolic = Number(directMatch[1]);
+    const diastolic = Number(directMatch[2]);
+    if (isValidBloodPressure(systolic, diastolic)) {
+      return { systolic, diastolic };
+    }
+  }
+
+  return null;
+}
+
+function isValidBloodPressure(systolic, diastolic) {
+  if (!Number.isFinite(systolic) || !Number.isFinite(diastolic)) return false;
+  if (systolic < 70 || systolic > 260) return false;
+  if (diastolic < 40 || diastolic > 180) return false;
+  if (systolic <= diastolic) return false;
+  return true;
 }
 
 function parseGestationalWeeks(text = '') {
-  const match = text.match(/(\d{1,2})\s*(semanas|semana|semanas de gestacao|semanas de gestação)/i);
-  return match ? Number(match[1]) : null;
+  const source = String(text || '');
+  const match = source.match(/(\d{1,2})\s*(semanas|semana|semanas de gestacao|semanas de gestação)/i);
+  if (!match) return null;
+
+  const weeks = Number(match[1]);
+  if (!Number.isFinite(weeks) || weeks < 1 || weeks > 45) return null;
+
+  return weeks;
 }
 
 function extractSymptoms(text = '') {
-  const normalized = normalizeText(text);
+  const normalized = normalizeText(String(text || ''));
+
   return symptomDictionary
     .filter((item) => item.aliases.some((alias) => normalized.includes(normalizeText(alias))))
     .map((item) => item.key);
 }
 
+function normalizeSymptomList(text = '') {
+  return String(text || '')
+    .split(',')
+    .map((item) => normalizeText(item).replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
 function parseNumericExam(text, patterns) {
+  const source = String(text || '');
+
   for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match) return Number(match[1].replace(',', '.'));
+    const match = source.match(pattern);
+    if (match) {
+      const value = Number(String(match[1]).replace(',', '.'));
+      if (Number.isFinite(value)) return value;
+    }
   }
+
   return null;
 }
 
 function parseExamData(text = '') {
+  const source = String(text || '');
+
   return {
-    proteinuriaMg: parseNumericExam(text, [
-      /protein[úu]ria[^\d]{0,15}(\d+[\.,]?\d*)\s*mg/i,
-      /prote[ií]na[^\d]{0,15}(\d+[\.,]?\d*)\s*mg/i
+    proteinuriaMg: parseNumericExam(source, [
+      /protein[úu]ria[^\d]{0,20}(\d+[\.,]?\d*)\s*mg/i,
+      /protein[úu]ria[^\d]{0,20}(\d+[\.,]?\d*)\s*mg\/24h/i,
+      /protein[úu]ria[^\d]{0,20}(\d+[\.,]?\d*)/i
     ]),
-    fastingGlucose: parseNumericExam(text, [
-      /glicemia(?:\s+de\s+jejum)?[^\d]{0,15}(\d+[\.,]?\d*)\s*mg\/d?l/i,
-      /glucose[^\d]{0,15}(\d+[\.,]?\d*)\s*mg\/d?l/i
+    fastingGlucose: parseNumericExam(source, [
+      /glicemia(?:\s+de\s+jejum)?[^\d]{0,20}(\d+[\.,]?\d*)\s*mg\/d?l/i,
+      /glucose[^\d]{0,20}(\d+[\.,]?\d*)\s*mg\/d?l/i
     ]),
-    hba1c: parseNumericExam(text, [
-      /hba1c[^\d]{0,15}(\d+[\.,]?\d*)\s*%/i,
-      /hemoglobina glicada[^\d]{0,15}(\d+[\.,]?\d*)\s*%/i
+    hba1c: parseNumericExam(source, [
+      /hba1c[^\d]{0,20}(\d+[\.,]?\d*)\s*%/i,
+      /hemoglobina glicada[^\d]{0,20}(\d+[\.,]?\d*)\s*%/i
     ])
   };
 }
 
 function inferRiskScore({ isPregnant, gestationalWeeks, pressure, symptoms, examData }) {
   let score = 0;
+
   if (isPregnant) score += 1;
   if ((gestationalWeeks || 0) >= 20) score += 1;
+
   if (pressure && (pressure.systolic >= 140 || pressure.diastolic >= 90)) score += 3;
   if (pressure && (pressure.systolic >= 160 || pressure.diastolic >= 110)) score += 2;
+
   if (symptoms.includes('cefaleia persistente')) score += 1;
   if (symptoms.includes('visao turva')) score += 1;
   if (symptoms.includes('dor epigastrica')) score += 1;
   if (symptoms.includes('oliguria')) score += 1;
   if (symptoms.includes('convulsoes')) score += 3;
+  if (symptoms.includes('dispneia')) score += 1;
+
   if ((examData.proteinuriaMg || 0) >= 300) score += 3;
   if ((examData.fastingGlucose || 0) >= 126) score += 3;
   if ((examData.hba1c || 0) >= 6.5) score += 2;
+
   return Math.min(score, 10);
 }
 
@@ -93,35 +140,54 @@ function buildPreeclampsiaAssessment(context) {
   let probableDiagnosis = 'suspeita de pré-eclâmpsia';
   let confidence = 'moderada';
 
-  if (gestationalWeeks && gestationalWeeks >= 20) reasons.push(`gestação com ${gestationalWeeks} semanas`);
+  if (gestationalWeeks && gestationalWeeks >= 20) {
+    reasons.push(`gestação com ${gestationalWeeks} semanas`);
+  }
+
   if (pressure && (pressure.systolic >= 140 || pressure.diastolic >= 90)) {
     reasons.push(`pressão arterial elevada (${pressure.systolic}/${pressure.diastolic})`);
   }
-  for (const symptom of ['cefaleia persistente', 'edema', 'oliguria', 'visao turva', 'dor epigastrica']) {
-    if (symptoms.includes(symptom)) reasons.push(symptom);
+
+  for (const symptom of ['cefaleia persistente', 'edema', 'oliguria', 'visao turva', 'dor epigastrica', 'dispneia']) {
+    if (symptoms.includes(symptom)) {
+      reasons.push(symptom);
+    }
   }
 
   if ((examData.proteinuriaMg || 0) >= 300) {
     probableDiagnosis = 'provável pré-eclâmpsia';
     confidence = 'alta';
     reasons.push(`proteinúria sugestiva (${examData.proteinuriaMg} mg)`);
-  } else if (pressure && (pressure.systolic >= 140 || pressure.diastolic >= 90) && symptoms.length >= 2) {
+  } else if (
+    pressure &&
+    (pressure.systolic >= 140 || pressure.diastolic >= 90) &&
+    symptoms.filter((item) =>
+      ['cefaleia persistente', 'edema', 'oliguria', 'visao turva', 'dor epigastrica', 'dispneia'].includes(item)
+    ).length >= 2
+  ) {
     probableDiagnosis = 'provável pré-eclâmpsia';
     confidence = 'moderada-alta';
   }
 
   recommendations.push('Recomendado considerar confirmação/estratificação com proteinúria urinária e avaliação laboratorial materna.');
   recommendations.push('Recomendado considerar hemograma/plaquetas, creatinina/função renal e enzimas hepáticas conforme protocolo do serviço.');
+
   if ((examData.proteinuriaMg || 0) < 300) {
     recommendations.push('Recomendado considerar exame de sangue para apoio à comprovação do quadro, sempre junto da investigação urinária apropriada.');
   }
 
   conduct.push('Pode ser apropriado manter observação clínica e reavaliações seriadas da pressão arterial conforme protocolo institucional.');
   conduct.push('Pode ser apropriado discutir necessidade de internação e monitorização materno-fetal se persistirem sinais de alarme ou alterações laboratoriais.');
+
   if (pressure && (pressure.systolic >= 140 || pressure.diastolic >= 90)) {
     conduct.push('Pode ser apropriado avaliar controle pressórico com anti-hipertensivos próprios para gestação, de acordo com avaliação médica e protocolo local.');
   }
-  if ((examData.proteinuriaMg || 0) >= 300 || symptoms.includes('convulsoes') || (pressure && (pressure.systolic >= 160 || pressure.diastolic >= 110))) {
+
+  if (
+    (examData.proteinuriaMg || 0) >= 300 ||
+    symptoms.includes('convulsoes') ||
+    (pressure && (pressure.systolic >= 160 || pressure.diastolic >= 110))
+  ) {
     conduct.push('Se houver sinais de gravidade, pode ser apropriado discutir uso de sulfato de magnésio e definição do momento do parto conforme idade gestacional e condição materno-fetal.');
   }
 
@@ -214,33 +280,77 @@ function buildDiabetesAssessment(context) {
 }
 
 export function analyzeClinicalContext({ question = '', chartData = {} }) {
+  const safeChartData = chartData || {};
+
   const mergedText = [
     question,
-    chartData.age ? `idade ${chartData.age}` : '',
-    chartData.weeks ? `${chartData.weeks} semanas` : '',
-    chartData.symptoms || '',
-    chartData.exams || '',
-    chartData.notes || ''
-  ].join(' ');
+    safeChartData.age ? `idade ${safeChartData.age}` : '',
+    safeChartData.weeks ? `${safeChartData.weeks} semanas` : '',
+    safeChartData.symptoms || '',
+    safeChartData.exams || '',
+    safeChartData.notes || ''
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   const normalized = normalizeText(mergedText);
-  const isPregnant = /(gestante|gravida|grávida|obstetr)/.test(normalized) || Number(chartData.weeks || 0) > 0;
-  const gestationalWeeks = Number(chartData.weeks || 0) || parseGestationalWeeks(mergedText);
-  const pressure = parseBloodPressure(`${question} ${chartData.notes || ''} ${chartData.exams || ''}`);
-  const symptoms = Array.from(new Set([
-    ...extractSymptoms(mergedText),
-    ...String(chartData.symptoms || '').split(',').map((item) => normalizeText(item)).filter(Boolean)
-  ])).map((item) => item.replace(/\s+/g, ' ').trim());
-  const examData = parseExamData(`${chartData.exams || ''} ${question}`);
+  const isPregnant =
+    /(gestante|gravida|grávida|obstetr)/.test(normalized) ||
+    Number(safeChartData.weeks || 0) > 0;
 
-  const preeclampsiaSignals = isPregnant && (gestationalWeeks >= 20 || gestationalWeeks === null) && pressure && (pressure.systolic >= 140 || pressure.diastolic >= 90);
-  const diabetesSignals = (examData.fastingGlucose || 0) >= 92 || (examData.hba1c || 0) >= 5.7 || symptoms.includes('polidipsia') || symptoms.includes('poliuria');
+  const gestationalWeeks =
+    Number(safeChartData.weeks || 0) || parseGestationalWeeks(mergedText);
+
+  const pressure = parseBloodPressure(
+    `${question} ${safeChartData.notes || ''} ${safeChartData.exams || ''}`
+  );
+
+  const symptoms = unique([
+    ...extractSymptoms(mergedText),
+    ...normalizeSymptomList(safeChartData.symptoms || '')
+  ]).map((item) => item.replace(/\s+/g, ' ').trim());
+
+  const examData = parseExamData(`${safeChartData.exams || ''} ${question}`);
+
+  const preeclampsiaSignals =
+    isPregnant &&
+    ((gestationalWeeks || 0) >= 20 || gestationalWeeks == null) &&
+    pressure &&
+    (pressure.systolic >= 140 || pressure.diastolic >= 90);
+
+  const diabetesSignals =
+    (examData.fastingGlucose || 0) >= 92 ||
+    (examData.hba1c || 0) >= 5.7 ||
+    symptoms.includes('polidipsia') ||
+    symptoms.includes('poliuria');
 
   let primaryAssessment;
-  if (preeclampsiaSignals) primaryAssessment = buildPreeclampsiaAssessment({ isPregnant, gestationalWeeks, pressure, symptoms, examData });
-  else if (isPregnant && diabetesSignals) primaryAssessment = buildGestationalDiabetesAssessment({ isPregnant, gestationalWeeks, pressure, symptoms, examData });
-  else if (diabetesSignals) primaryAssessment = buildDiabetesAssessment({ isPregnant, gestationalWeeks, pressure, symptoms, examData });
-  else {
+
+  if (preeclampsiaSignals) {
+    primaryAssessment = buildPreeclampsiaAssessment({
+      isPregnant,
+      gestationalWeeks,
+      pressure,
+      symptoms,
+      examData
+    });
+  } else if (isPregnant && diabetesSignals) {
+    primaryAssessment = buildGestationalDiabetesAssessment({
+      isPregnant,
+      gestationalWeeks,
+      pressure,
+      symptoms,
+      examData
+    });
+  } else if (diabetesSignals) {
+    primaryAssessment = buildDiabetesAssessment({
+      isPregnant,
+      gestationalWeeks,
+      pressure,
+      symptoms,
+      examData
+    });
+  } else {
     primaryAssessment = {
       type: 'fora do escopo',
       probableDiagnosis: 'fora do escopo principal (pré-eclâmpsia/diabetes)',
@@ -252,27 +362,37 @@ export function analyzeClinicalContext({ question = '', chartData = {} }) {
     };
   }
 
-  const riskScore = inferRiskScore({ isPregnant, gestationalWeeks, pressure, symptoms, examData });
+  const riskScore = inferRiskScore({
+    isPregnant,
+    gestationalWeeks,
+    pressure,
+    symptoms,
+    examData
+  });
+
   const examInterpretation = [];
+
   if (examData.proteinuriaMg != null) {
     examInterpretation.push(
-      (examData.proteinuriaMg >= 300)
+      examData.proteinuriaMg >= 300
         ? `Proteinúria de ${examData.proteinuriaMg} mg: valor sugestivo de proteinúria significativa.`
         : `Proteinúria de ${examData.proteinuriaMg} mg: abaixo do ponto clássico de 300 mg, exigindo correlação clínica.`
     );
   }
+
   if (examData.fastingGlucose != null) {
     examInterpretation.push(
-      (examData.fastingGlucose >= 126)
+      examData.fastingGlucose >= 126
         ? `Glicemia de ${examData.fastingGlucose} mg/dL: compatível com hiperglicemia importante.`
-        : (examData.fastingGlucose >= 92 && isPregnant)
+        : examData.fastingGlucose >= 92 && isPregnant
           ? `Glicemia de ${examData.fastingGlucose} mg/dL: merece atenção no contexto gestacional.`
           : `Glicemia de ${examData.fastingGlucose} mg/dL: interpretar conforme contexto clínico e protocolo do serviço.`
     );
   }
+
   if (examData.hba1c != null) {
     examInterpretation.push(
-      (examData.hba1c >= 6.5)
+      examData.hba1c >= 6.5
         ? `HbA1c de ${examData.hba1c}%: compatível com descontrole glicêmico relevante.`
         : `HbA1c de ${examData.hba1c}%: correlacionar com restante da avaliação clínica.`
     );
@@ -280,12 +400,12 @@ export function analyzeClinicalContext({ question = '', chartData = {} }) {
 
   return {
     patientSummary: {
-      age: chartData.age || null,
+      age: safeChartData.age || null,
       gestationalWeeks: gestationalWeeks || null,
       bloodPressure: pressure ? `${pressure.systolic}/${pressure.diastolic}` : null,
       symptoms,
       exams: examData,
-      notes: chartData.notes || ''
+      notes: safeChartData.notes || ''
     },
     classification: classifyColor(riskScore),
     riskScore,
